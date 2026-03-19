@@ -1,36 +1,109 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Word Sprint
 
-## Getting Started
+Real-time 1v1 Wordle races. Two players share a room, guess the same words, and race to win — either by finishing all rounds first (Sprint) or accumulating the most points (Points).
 
-First, run the development server:
+**Live:** [word-sprint-production.up.railway.app](https://word-sprint-production.up.railway.app)
+
+---
+
+## How it works
+
+- **Sprint mode** — both players work through the same sequence of words. First to finish all rounds wins. Tiebreak on fewest total guesses.
+- **Points mode** — race to 12 points. Fewer guesses = more points (1 guess = 9 pts, 2 = 6, 3 = 4, 4 = 3, 5 = 2, 6 = 1). If both players hit 12 with equal scores, a tiebreaker word decides it.
+
+Both players see a mini live view of their opponent's board in real time.
+
+---
+
+## Tech stack
+
+| Layer | Tech |
+|---|---|
+| Frontend | Next.js 16 (App Router), React 19, Tailwind CSS 4 |
+| Real-time | Socket.IO 4 |
+| Server | Custom Node HTTP server (`server.ts`) colocated with Next.js |
+| Database | SQLite via `better-sqlite3` (word lists, answers) |
+| Hosting | Railway |
+| Tests | Playwright |
+
+---
+
+## Local development
+
+### Prerequisites
+
+- Node.js 20+
+- npm
+
+### Setup
 
 ```bash
+git clone https://github.com/anujarora8/word-sprint.git
+cd word-sprint
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). The server fetches word lists from external APIs on first run — this takes a few seconds.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Environment variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Variable | Required | Description |
+|---|---|---|
+| `PORT` | No | Server port (default: `3000`) |
+| `CORS_ORIGIN` | Production only | Allowed origin, e.g. `https://word-sprint-production.up.railway.app` |
+| `RESET_WORDS` | No | Set to `true` to force re-sync the answers DB on next startup |
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## Project structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+server.ts          # Socket.IO + HTTP server (game logic lives here)
+db.ts              # SQLite helpers — word lists, answers, prepared statements
+src/
+  app/
+    page.tsx               # Home page (create/join room)
+    game/[roomId]/page.tsx # Live game page
+    globals.css
+  components/
+    GameBoard.tsx    # Animated 6×5 guess grid
+    Keyboard.tsx     # On-screen keyboard with letter-state colouring
+    OpponentBoard.tsx # Mini dot-grid view of opponent's board
+  lib/
+    socket.ts        # Singleton Socket.IO client
+    types.ts         # Shared types (server + client)
+tests/
+  home.spec.ts       # Playwright: home page flows
+  multiplayer.spec.ts # Playwright: full 1v1 game scenarios
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Running tests
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The test suite uses Playwright against a locally running server.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+# Install browsers (first time only)
+npx playwright install chromium
+
+# Run all tests
+npx playwright test
+
+# Run with browser visible
+npx playwright test --headed
+```
+
+Tests cover: home page validation, room create/join, lobby settings, gameplay (typing, backspace, invalid words, keyboard state), disconnect handling, and points mode.
+
+---
+
+## Deployment (Railway)
+
+The app is deployed on Railway via GitHub integration. Pushes to `main` show up as a pending change in the Railway dashboard — click **Deploy** to apply.
+
+Required environment variable in production:
+```
+CORS_ORIGIN=https://word-sprint-production.up.railway.app
+```
