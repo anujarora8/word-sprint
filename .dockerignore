@@ -1,0 +1,7 @@
+node_modules
+.next
+words.db
+words.db-shm
+words.db-wal
+.git
+*.tsbuildinfo
