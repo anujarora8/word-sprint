@@ -22,14 +22,14 @@ export default function Home() {
     socket.on("room_joined", ({ roomId }: { roomId: string }) => {
       router.push(`/game/${roomId}`);
     });
-    socket.on("error", ({ message }: { message: string }) => {
+    socket.on("app_error", ({ message }: { message: string }) => {
       setError(message);
       setLoading(false);
     });
     return () => {
       socket.off("room_created");
       socket.off("room_joined");
-      socket.off("error");
+      socket.off("app_error");
     };
   }, [router]);
 

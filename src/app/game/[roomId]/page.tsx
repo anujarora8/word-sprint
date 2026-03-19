@@ -1,62 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getSocket } from "@/lib/socket";
 import GameBoard from "@/components/GameBoard";
 import Keyboard from "@/components/Keyboard";
 import OpponentBoard from "@/components/OpponentBoard";
-
-type LetterState = "correct" | "present" | "absent";
-type ScoringMode = "sprint" | "points";
-
-interface GuessResult {
-  letter: string;
-  state: LetterState;
-}
-
-interface PlayerSnapshot {
-  id: string;
-  name: string;
-  guesses: GuessResult[][];
-  wordsCompleted: number;
-  totalGuesses: number;
-  finished: boolean;
-  wordsFailed: number;
-  score: number;
-  tiebreakerScore: number;
-  tiebreakerDone: boolean;
-}
-
-interface RoomSnapshot {
-  id: string;
-  started: boolean;
-  finished: boolean;
-  totalRounds: number;
-  scoringMode: ScoringMode;
-  tiebreaker: boolean;
-  players: PlayerSnapshot[];
-}
-
-interface MatchOverResult {
-  id: string;
-  name: string;
-  wordsCompleted: number;
-  wordsFailed: number;
-  totalGuesses: number;
-  finished: boolean;
-  score: number;
-  tiebreakerScore: number;
-}
-
-interface WordFlash {
-  word: string;
-  solved: boolean;
-  pointsEarned: number;
-  newTotal: number;
-  pointsToWin: number;
-  tiebreaker: boolean;
-}
+import type { ScoringMode, RoomSnapshot, MatchOver, WordFlash, LetterState } from "@/lib/types";
 
 const POINTS_TO_WIN = 12;
 
@@ -69,7 +19,7 @@ export default function GamePage() {
   const [currentGuess, setCurrentGuess] = useState("");
   const [message, setMessage] = useState("");
   const [wordFlash, setWordFlash] = useState<WordFlash | null>(null);
-  const [matchOver, setMatchOver] = useState<{ scoringMode: ScoringMode; tiebreaker: boolean; results: MatchOverResult[] } | null>(null);
+  const [matchOver, setMatchOver] = useState<MatchOver | null>(null);
   const [opponentLeft, setOpponentLeft] = useState(false);
   const [shake, setShake] = useState(false);
   const [tiebreakerBanner, setTiebreakerBanner] = useState(false);
@@ -81,7 +31,8 @@ export default function GamePage() {
   const opponent = room?.players.find((p) => p.id !== myId) ?? null;
   const isHost = room?.players[0]?.id === myId;
 
-  const letterStates = useCallback((): Record<string, LetterState> => {
+  // Memoize computed keyboard state — only recalculates when a new guess arrives
+  const letterStates = useMemo((): Record<string, LetterState> => {
     const states: Record<string, LetterState> = {};
     if (!myPlayer) return states;
     for (const guess of myPlayer.guesses) {
@@ -146,14 +97,14 @@ export default function GamePage() {
       flashTimerRef.current = setTimeout(() => setWordFlash(null), 2500);
     });
 
-    socket.on("match_over", (data: { scoringMode: ScoringMode; tiebreaker: boolean; results: MatchOverResult[] }) => {
+    socket.on("match_over", (data: MatchOver) => {
       setMatchOver(data);
       setWordFlash(null);
       setTiebreakerBanner(false);
     });
 
     socket.on("opponent_disconnected", () => setOpponentLeft(true));
-    socket.on("error", ({ message }: { message: string }) => {
+    socket.on("app_error", ({ message }: { message: string }) => {
       setMessage(message);
       setShake(true);
       if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
@@ -169,7 +120,7 @@ export default function GamePage() {
       socket.off("word_result");
       socket.off("match_over");
       socket.off("opponent_disconnected");
-      socket.off("error");
+      socket.off("app_error");
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
       if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
     };
@@ -242,7 +193,7 @@ export default function GamePage() {
       {/* Tiebreaker persistent badge (during play) */}
       {room.started && !matchOver && room.tiebreaker && !tiebreakerBanner && (
         <div className="bg-yellow-500/10 border border-yellow-600/50 rounded-lg px-4 py-2 text-yellow-400 text-sm font-semibold">
-          ⚡ Tiebreaker round
+          Tiebreaker round
         </div>
       )}
 
@@ -422,7 +373,7 @@ export default function GamePage() {
                   name=""
                   guesses={opponent.guesses}
                   solved={opponent.finished}
-                  gaveUp={false}
+                  wordsFailed={opponent.wordsFailed}
                 />
               </div>
             ) : (
@@ -440,8 +391,8 @@ export default function GamePage() {
               }`}>
                 <span className={wordFlash.solved ? "text-sky-300" : "text-red-300"}>
                   {wordFlash.solved
-                    ? `✓ "${wordFlash.word.toUpperCase()}" solved!`
-                    : `✗ The word was "${wordFlash.word.toUpperCase()}"`}
+                    ? `"${wordFlash.word.toUpperCase()}" solved!`
+                    : `The word was "${wordFlash.word.toUpperCase()}"`}
                 </span>
                 {isPoints && (
                   <span className="text-yellow-400 font-extrabold">
@@ -466,7 +417,7 @@ export default function GamePage() {
                   shake={shake}
                 />
                 {message && <p className="text-yellow-400 text-xs font-medium">{message}</p>}
-                <Keyboard letterStates={letterStates()} onKey={handleKey} />
+                <Keyboard letterStates={letterStates} onKey={handleKey} />
               </>
             )}
 
@@ -497,24 +448,9 @@ export default function GamePage() {
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-8 w-full max-w-sm text-center flex flex-col gap-4">
             {(() => {
-              const me = matchOver.results.find((r) => r.id === myId);
-              const opp = matchOver.results.find((r) => r.id !== myId);
-
-              let iWon: boolean;
-              let isDraw: boolean;
-
-              if (matchOver.scoringMode === "points") {
-                const myFinal = (me?.score ?? 0) + (matchOver.tiebreaker ? (me?.tiebreakerScore ?? 0) : 0);
-                const oppFinal = (opp?.score ?? 0) + (matchOver.tiebreaker ? (opp?.tiebreakerScore ?? 0) : 0);
-                isDraw = myFinal === oppFinal;
-                iWon = !isDraw && myFinal > oppFinal;
-              } else {
-                isDraw = !!(me?.finished && opp?.finished && me.totalGuesses === opp.totalGuesses);
-                iWon = !isDraw && !!(
-                  (me?.finished && !opp?.finished) ||
-                  (me?.finished && opp?.finished && (me.totalGuesses ?? 999) < (opp?.totalGuesses ?? 999))
-                );
-              }
+              // Server is authoritative on who won — no need to re-derive locally
+              const iWon = matchOver.winnerId === myId;
+              const isDraw = matchOver.winnerId === null;
 
               return (
                 <>

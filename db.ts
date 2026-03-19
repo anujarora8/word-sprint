@@ -39,17 +39,27 @@ export function initSchema(): void {
 // ---------------------------------------------------------------------------
 
 function getMeta(key: string): string | null {
-  const row = db()
-    .prepare("SELECT value FROM meta WHERE key = ?")
-    .get(key) as { value: string } | undefined;
+  stmts.getMeta ??= db().prepare("SELECT value FROM meta WHERE key = ?");
+  const row = stmts.getMeta.get(key) as { value: string } | undefined;
   return row?.value ?? null;
 }
 
 function setMeta(key: string, value: string): void {
-  db()
-    .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-    .run(key, value);
+  stmts.setMeta ??= db().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+  stmts.setMeta.run(key, value);
 }
+
+// ---------------------------------------------------------------------------
+// Cached prepared statements — prepared once, reused on every call
+// ---------------------------------------------------------------------------
+
+const stmts: {
+  isValidWordValid?: Database.Statement;
+  isValidWordAnswer?: Database.Statement;
+  randomAnswer?: Database.Statement;
+  getMeta?: Database.Statement;
+  setMeta?: Database.Statement;
+} = {};
 
 // ---------------------------------------------------------------------------
 // Word queries (synchronous — no API calls during gameplay)
@@ -57,21 +67,20 @@ function setMeta(key: string, value: string): void {
 
 export function isValidWord(word: string): boolean {
   const w = word.toLowerCase();
-  // Check both tables; answers are always valid guesses too
-  return (
-    !!db().prepare("SELECT 1 FROM valid_words WHERE word = ?").get(w) ||
-    !!db().prepare("SELECT 1 FROM answers WHERE word = ?").get(w)
-  );
+  stmts.isValidWordValid ??= db().prepare("SELECT 1 FROM valid_words WHERE word = ?");
+  stmts.isValidWordAnswer ??= db().prepare("SELECT 1 FROM answers WHERE word = ?");
+  return !!stmts.isValidWordValid.get(w) || !!stmts.isValidWordAnswer.get(w);
 }
 
 export function pickWord(exclude: Set<string> = new Set()): string {
   if (exclude.size === 0) {
-    const row = db()
-      .prepare("SELECT word FROM answers ORDER BY RANDOM() LIMIT 1")
-      .get() as { word: string } | undefined;
+    stmts.randomAnswer ??= db().prepare("SELECT word FROM answers ORDER BY RANDOM() LIMIT 1");
+    const row = stmts.randomAnswer.get() as { word: string } | undefined;
     return row?.word ?? "crane";
   }
 
+  // Exclusion list varies in size — cannot cache this statement, but the no-exclusion
+  // path (the hot path during normal gameplay) IS cached above.
   const placeholders = Array.from({ length: exclude.size }, () => "?").join(",");
   const row = db()
     .prepare(
@@ -81,10 +90,8 @@ export function pickWord(exclude: Set<string> = new Set()): string {
 
   // Fallback: if somehow every answer word was used, sample from full pool
   if (!row) {
-    const fallback = db()
-      .prepare("SELECT word FROM answers ORDER BY RANDOM() LIMIT 1")
-      .get() as { word: string } | undefined;
-    return fallback?.word ?? "crane";
+    stmts.randomAnswer ??= db().prepare("SELECT word FROM answers ORDER BY RANDOM() LIMIT 1");
+    return (stmts.randomAnswer.get() as { word: string } | undefined)?.word ?? "crane";
   }
 
   return row.word;

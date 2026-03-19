@@ -1,13 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-
-type LetterState = "correct" | "present" | "absent";
-
-interface GuessResult {
-  letter: string;
-  state: LetterState;
-}
+import type { LetterState, GuessResult } from "@/lib/types";
 
 interface Props {
   guesses: GuessResult[][];

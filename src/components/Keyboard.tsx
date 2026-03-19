@@ -1,8 +1,7 @@
 "use client";
 
 import React from "react";
-
-type LetterState = "correct" | "present" | "absent";
+import type { LetterState } from "@/lib/types";
 
 interface Props {
   letterStates: Record<string, LetterState>;
@@ -21,6 +20,19 @@ const STATE_CLASSES: Record<LetterState, string> = {
   absent: "bg-zinc-600 text-zinc-300",
 };
 
+const STATE_LABELS: Record<LetterState, string> = {
+  correct: "correct position",
+  present: "wrong position",
+  absent: "not in word",
+};
+
+function keyAriaLabel(key: string, state: LetterState | undefined): string {
+  if (key === "⌫") return "Backspace";
+  if (key === "Enter") return "Enter";
+  const stateNote = state ? `, ${STATE_LABELS[state]}` : "";
+  return `${key.toUpperCase()}${stateNote}`;
+}
+
 export default function Keyboard({ letterStates, onKey }: Props) {
   return (
     <div className="flex flex-col gap-1.5 items-center select-none">
@@ -33,6 +45,7 @@ export default function Keyboard({ letterStates, onKey }: Props) {
               <button
                 key={key}
                 onClick={() => onKey(key)}
+                aria-label={keyAriaLabel(key, state)}
                 className={`h-12 ${isWide ? "px-3 text-xs" : "w-9"} rounded font-bold uppercase cursor-pointer transition-colors ${
                   state ? STATE_CLASSES[state] : "bg-zinc-500 text-white hover:bg-zinc-400"
                 }`}

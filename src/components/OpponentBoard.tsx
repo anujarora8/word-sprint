@@ -1,19 +1,13 @@
 "use client";
 
 import React from "react";
-
-type LetterState = "correct" | "present" | "absent";
-
-interface GuessResult {
-  letter: string;
-  state: LetterState;
-}
+import type { LetterState, GuessResult } from "@/lib/types";
 
 interface Props {
   name: string;
   guesses: GuessResult[][];
   solved: boolean;
-  gaveUp: boolean;
+  wordsFailed: number;
 }
 
 const STATE_DOT: Record<LetterState, string> = {
@@ -22,12 +16,14 @@ const STATE_DOT: Record<LetterState, string> = {
   absent: "bg-zinc-500",
 };
 
-export default function OpponentBoard({ name, guesses, solved, gaveUp }: Props) {
+export default function OpponentBoard({ name, guesses, solved, wordsFailed }: Props) {
   return (
     <div className="flex flex-col items-center gap-2">
       {name && <h3 className="text-sm font-semibold text-zinc-300">{name}</h3>}
       {!name && solved && <span className="text-xs text-sky-400 font-bold">DONE!</span>}
-      {!name && gaveUp && <span className="text-xs text-red-400 font-bold">OUT</span>}
+      {!name && wordsFailed > 0 && !solved && (
+        <span className="text-xs text-red-400 font-bold">{wordsFailed} missed</span>
+      )}
       <div className="grid gap-1">
         {Array.from({ length: 6 }, (_, rowIdx) => (
           <div key={rowIdx} className="flex gap-1">
