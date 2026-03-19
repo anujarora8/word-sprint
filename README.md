@@ -2,8 +2,6 @@
 
 Real-time 1v1 Wordle races. Two players share a room, guess the same words, and race to win — either by finishing all rounds first (Sprint) or accumulating the most points (Points).
 
-**Live:** [word-sprint-production.up.railway.app](https://word-sprint-production.up.railway.app)
-
 ---
 
 ## How it works
@@ -99,11 +97,11 @@ Tests cover: home page validation, room create/join, lobby settings, gameplay (t
 
 ---
 
-## Deployment (Railway)
+## Deployment
 
-The app is deployed on Railway via GitHub integration. Pushes to `main` show up as a pending change in the Railway dashboard — click **Deploy** to apply.
+The app is deployed via Railway (GitHub integration). Pushes to `main` trigger a new deployment.
 
 Required environment variable in production:
 ```
-CORS_ORIGIN=https://word-sprint-production.up.railway.app
+CORS_ORIGIN=https://your-production-domain.com
 ```
