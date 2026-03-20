@@ -11,7 +11,7 @@ interface Props {
 const ROWS = [
   ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
   ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
-  ["Enter", "z", "x", "c", "v", "b", "n", "m", "⌫"],
+  ["Enter", "z", "x", "c", "v", "b", "n", "m", "Back"],
 ];
 
 const STATE_CLASSES: Record<LetterState, string> = {
@@ -27,7 +27,7 @@ const STATE_LABELS: Record<LetterState, string> = {
 };
 
 function keyAriaLabel(key: string, state: LetterState | undefined): string {
-  if (key === "⌫") return "Backspace";
+  if (key === "Back") return "Backspace";
   if (key === "Enter") return "Enter";
   const stateNote = state ? `, ${STATE_LABELS[state]}` : "";
   return `${key.toUpperCase()}${stateNote}`;
@@ -40,17 +40,17 @@ export default function Keyboard({ letterStates, onKey }: Props) {
         <div key={i} className="flex gap-1.5">
           {row.map((key) => {
             const state = letterStates[key];
-            const isWide = key === "Enter" || key === "⌫";
+            const isWide = key === "Enter" || key === "Back";
             return (
               <button
                 key={key}
                 onClick={() => onKey(key)}
                 aria-label={keyAriaLabel(key, state)}
-                className={`h-12 ${isWide ? "px-3 text-xs" : "w-9"} rounded font-bold uppercase cursor-pointer transition-colors ${
+                className={`h-12 ${isWide ? "px-3 text-sm" : "w-9"} rounded font-bold uppercase cursor-pointer transition-colors touch-manipulation select-none ${
                   state ? STATE_CLASSES[state] : "bg-zinc-500 text-white hover:bg-zinc-400"
                 }`}
               >
-                {key}
+                {key === "Back" ? "⌫" : key}
               </button>
             );
           })}

@@ -463,17 +463,20 @@ app.prepare().then(async () => {
         player.finished = true;
         player.waitingForOpponent = false;
         if (other && !other.finished) {
+          // player hit 12 first — give opponent one grace word
           other.waitingForOpponent = true;
           persistRoom(room);
           io.to(currentRoomId).emit("room_update", roomSnapshot(room));
         } else {
-          resolvePointsGame(room, allPlayers, currentRoomId, io);
+          // other was already finished → other hit 12 first
+          resolvePointsGame(room, allPlayers, currentRoomId, io, other?.id ?? player.id);
         }
       } else if (other?.waitingForOpponent) {
+        // other hit 12 first; this player just finished their grace word
         other.waitingForOpponent = false;
         persistRoom(room);
         io.to(currentRoomId).emit("room_update", roomSnapshot(room));
-        resolvePointsGame(room, allPlayers, currentRoomId, io);
+        resolvePointsGame(room, allPlayers, currentRoomId, io, other.id);
       } else {
         while (room.wordSequence.length <= player.wordsCompleted) {
           const extra = pickWord(room.wordSet);
@@ -542,9 +545,16 @@ app.prepare().then(async () => {
   httpServer.listen(port, () => console.log(`> Ready on http://localhost:${port}`));
 });
 
-function resolvePointsGame(room: Room, allPlayers: PlayerState[], roomId: string, io: Server) {
+function resolvePointsGame(
+  room: Room,
+  allPlayers: PlayerState[],
+  roomId: string,
+  io: Server,
+  firstFinisherId?: string,
+) {
   const [a, b] = allPlayers;
 
+  // Tiebreaker: both hit 12 and ended on identical scores
   if (a && b && a.finished && b.finished && a.score === b.score) {
     room.tiebreaker = true;
     const tbWord = pickWord(room.wordSet);
@@ -564,12 +574,9 @@ function resolvePointsGame(room: Room, allPlayers: PlayerState[], roomId: string
     return;
   }
 
+  // First to 12 wins — score during the grace word is irrelevant
   room.finished = true;
-  let winnerId: string | null = null;
-  if (a && b) {
-    if (a.score > b.score) winnerId = a.id;
-    else if (b.score > a.score) winnerId = b.id;
-  } else if (a) { winnerId = a.id; }
+  const winnerId = firstFinisherId ?? allPlayers.find((p) => p.finished)?.id ?? null;
 
   persistRoom(room);
   io.to(roomId).emit("match_over", {

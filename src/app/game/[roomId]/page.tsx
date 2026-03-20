@@ -138,7 +138,7 @@ export default function GamePage() {
     (key: string) => {
       if (matchOver || myPlayer?.finished) return;
       if (key === "Enter") submitGuess();
-      else if (key === "⌫" || key === "Backspace") setCurrentGuess((g) => g.slice(0, -1));
+      else if (key === "Back" || key === "⌫" || key === "Backspace") setCurrentGuess((g) => g.slice(0, -1));
       else if (/^[a-zA-Z]$/.test(key) && currentGuess.length < 5)
         setCurrentGuess((g) => g + key.toLowerCase());
     },
