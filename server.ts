@@ -56,6 +56,7 @@ interface PlayerState {
   tiebreakerScore: number;
   tiebreakerDone: boolean;
   waitingForOpponent: boolean;
+  ready: boolean;
 }
 
 interface Room {
@@ -63,6 +64,7 @@ interface Room {
   players: Map<string, PlayerState>; // keyed by persistent playerId
   started: boolean;
   finished: boolean;
+  counting: boolean;
   createdAt: number;
   totalRounds: number;
   scoringMode: ScoringMode;
@@ -116,6 +118,7 @@ function persistRoom(room: Room): void {
     id: room.id,
     started: room.started,
     finished: room.finished,
+    counting: room.counting,
     createdAt: room.createdAt,
     totalRounds: room.totalRounds,
     scoringMode: room.scoringMode,
@@ -134,6 +137,7 @@ function persistRoom(room: Room): void {
       tiebreakerScore: p.tiebreakerScore,
       tiebreakerDone: p.tiebreakerDone,
       waitingForOpponent: p.waitingForOpponent,
+      ready: p.ready,
       joinOrder: i,
     })),
   });
@@ -159,6 +163,7 @@ function restoreRooms(): void {
         tiebreakerScore: p.tiebreakerScore,
         tiebreakerDone: p.tiebreakerDone,
         waitingForOpponent: p.waitingForOpponent,
+        ready: p.ready,
       });
     }
     rooms.set(r.id, {
@@ -166,6 +171,7 @@ function restoreRooms(): void {
       players,
       started: r.started,
       finished: r.finished,
+      counting: false, // server can't resume countdown timers after restart
       createdAt: r.createdAt,
       totalRounds: r.totalRounds,
       scoringMode: r.scoringMode as ScoringMode,
@@ -247,6 +253,7 @@ app.prepare().then(async () => {
         players: new Map(),
         started: false,
         finished: false,
+        counting: false,
         createdAt: Date.now(),
         totalRounds: 3,
         scoringMode: "sprint",
@@ -313,6 +320,7 @@ app.prepare().then(async () => {
       const room = rooms.get(currentRoomId);
       if (!room || room.started || !isHost(room)) return;
       room.totalRounds = Math.min(Math.max(1, totalRounds), 5);
+      for (const p of room.players.values()) p.ready = false;
       persistRoom(room);
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
     });
@@ -323,8 +331,26 @@ app.prepare().then(async () => {
       if (!room || room.started || !isHost(room)) return;
       if (scoringMode !== "sprint" && scoringMode !== "points") return;
       room.scoringMode = scoringMode;
+      for (const p of room.players.values()) p.ready = false;
       persistRoom(room);
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
+    });
+
+    socket.on("player_ready", () => {
+      if (!currentRoomId || !currentPlayerId) return;
+      const room = rooms.get(currentRoomId);
+      if (!room || room.started || room.counting) return;
+      const player = room.players.get(currentPlayerId);
+      if (!player) return;
+
+      player.ready = !player.ready;
+      persistRoom(room);
+      io.to(currentRoomId).emit("room_update", roomSnapshot(room));
+
+      const allPlayers = [...room.players.values()];
+      if (allPlayers.length === 2 && allPlayers.every((p) => p.ready)) {
+        startCountdown(room, currentRoomId, io);
+      }
     });
 
     socket.on("start_game", () => {
@@ -498,6 +524,7 @@ app.prepare().then(async () => {
       if (!room || !isHost(room)) return;
       room.started = false;
       room.finished = false;
+      room.counting = false;
       room.tiebreaker = false;
       room.wordSequence = [];
       room.wordSet = new Set();
@@ -544,6 +571,38 @@ app.prepare().then(async () => {
 
   httpServer.listen(port, () => console.log(`> Ready on http://localhost:${port}`));
 });
+
+function startCountdown(room: Room, roomId: string, io: Server): void {
+  room.counting = true;
+  persistRoom(room);
+  io.to(roomId).emit("room_update", roomSnapshot(room));
+
+  let count = 3;
+  io.to(roomId).emit("countdown", { value: count });
+
+  const interval = setInterval(() => {
+    count--;
+    if (count > 0) {
+      io.to(roomId).emit("countdown", { value: count });
+    } else {
+      clearInterval(interval);
+      room.counting = false;
+      room.started = true;
+      room.tiebreaker = false;
+      const sequenceLen = room.scoringMode === "points" ? 20 : room.totalRounds;
+      const { words, wordSet } = generateWordSequence(sequenceLen);
+      room.wordSequence = words;
+      room.wordSet = wordSet;
+      console.log(`> Room ${room.id} word sequence: ${room.wordSequence.join(", ")}`);
+      for (const player of room.players.values()) {
+        resetPlayer(player, room.wordSequence[0]);
+      }
+      persistRoom(room);
+      io.to(roomId).emit("match_started");
+      io.to(roomId).emit("room_update", roomSnapshot(room));
+    }
+  }, 1000);
+}
 
 function resolvePointsGame(
   room: Room,
@@ -596,7 +655,7 @@ function makePlayer(id: string, name: string): PlayerState {
     wordsCompleted: 0, totalGuesses: 0, finished: false,
     wordsFailed: 0, score: 0,
     tiebreakerScore: 0, tiebreakerDone: false,
-    waitingForOpponent: false,
+    waitingForOpponent: false, ready: false,
   };
 }
 
@@ -611,6 +670,7 @@ function resetPlayerToLobby(player: PlayerState): void {
   player.tiebreakerScore = 0;
   player.tiebreakerDone = false;
   player.waitingForOpponent = false;
+  player.ready = false;
 }
 
 function resetPlayer(player: PlayerState, firstWord: string) {
@@ -624,6 +684,7 @@ function roomSnapshot(room: Room) {
     id: room.id,
     started: room.started,
     finished: room.finished,
+    counting: room.counting,
     totalRounds: room.totalRounds,
     scoringMode: room.scoringMode,
     tiebreaker: room.tiebreaker,
@@ -632,7 +693,7 @@ function roomSnapshot(room: Room) {
       wordsCompleted: p.wordsCompleted, totalGuesses: p.totalGuesses,
       finished: p.finished, wordsFailed: p.wordsFailed,
       score: p.score, tiebreakerScore: p.tiebreakerScore, tiebreakerDone: p.tiebreakerDone,
-      waitingForOpponent: p.waitingForOpponent,
+      waitingForOpponent: p.waitingForOpponent, ready: p.ready,
     })),
   };
 }

@@ -33,6 +33,17 @@ async function joinRoom(page: Page, name: string, roomId: string) {
   await page.waitForURL(`/game/${roomId}`);
 }
 
+/**
+ * Both players click Ready and we wait for the game to start.
+ * The server emits a 3-2-1 countdown (3 seconds total) before starting.
+ */
+async function startGame(host: Page, guest: Page) {
+  await host.getByRole("button", { name: "Ready" }).click();
+  await guest.getByRole("button", { name: "Ready" }).click();
+  // Wait for keyboard to appear — means the countdown finished and game started
+  await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible({ timeout: 10000 });
+}
+
 /** Type a 5-letter word via the on-screen keyboard and press Enter */
 async function typeGuessOnscreen(page: Page, word: string) {
   for (const letter of word) {
@@ -78,10 +89,9 @@ test.describe("Room creation and lobby", () => {
     await expect(host.getByText("Bob")).toBeVisible();
     await expect(guest.getByText("Alice")).toBeVisible();
 
-    // Start button becomes active for host
-    await expect(host.getByRole("button", { name: "Start" })).toBeEnabled();
-    // Guest sees mode summary, not start button
-    await expect(guest.getByText("Waiting for host to start")).toBeVisible();
+    // Ready button is available for both once the opponent has joined
+    await expect(host.getByRole("button", { name: "Ready" })).toBeEnabled();
+    await expect(guest.getByRole("button", { name: "Ready" })).toBeEnabled();
 
     await ctxA.close();
     await ctxB.close();
@@ -164,12 +174,9 @@ test.describe("Gameplay — Sprint mode", () => {
   test("game starts and both players see the board", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
+    await startGame(host, guest);
 
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByText("match_started")).not.toBeVisible();
-
-    // Both should see game boards (6×5 grid of tiles)
-    // The keyboard should appear
+    // Both should see the keyboard
     await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
     await expect(guest.getByRole("button", { name: /^Enter$/ })).toBeVisible();
   });
@@ -177,10 +184,7 @@ test.describe("Gameplay — Sprint mode", () => {
   test("typing a guess updates the current row", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-
-    // Wait for game to start (keyboard appears)
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     // Type 3 letters on the host page
     await host.keyboard.type("cra");
@@ -193,8 +197,7 @@ test.describe("Gameplay — Sprint mode", () => {
   test("backspace removes a letter from current guess", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     await host.keyboard.type("crane");
     // All 5 letters visible
@@ -210,8 +213,7 @@ test.describe("Gameplay — Sprint mode", () => {
   test("invalid word shows error shake", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     // "zzzzz" is almost certainly not a valid word
     await typeGuess(host, "zzzzz");
@@ -221,8 +223,7 @@ test.describe("Gameplay — Sprint mode", () => {
   test("guess shorter than 5 letters shows error", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     await host.keyboard.type("cra");
     await host.keyboard.press("Enter");
@@ -232,8 +233,7 @@ test.describe("Gameplay — Sprint mode", () => {
   test("on-screen keyboard reflects correct/present/absent states after a guess", async () => {
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     // Submit a valid word — "crane" is almost always in the valid-word list
     await typeGuess(host, "crane");
@@ -257,8 +257,7 @@ test.describe("Gameplay — Points mode", () => {
 
     // Switch to Points mode
     await host.getByRole("button", { name: "Points" }).click();
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     // Score bar should show 0 pts initially (both players shown — check host's bar)
     await expect(host.getByText(/0.*\/ 12/).first()).toBeVisible();
@@ -270,6 +269,7 @@ test.describe("Gameplay — Points mode", () => {
 
 test.describe("Disconnect handling", () => {
   test("remaining player sees disconnected notice when opponent leaves", async ({ browser }) => {
+    test.setTimeout(45000); // grace period is 30s, so we need a longer timeout
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
     const host = await ctxA.newPage();
@@ -277,14 +277,15 @@ test.describe("Disconnect handling", () => {
 
     const roomId = await createRoom(host, "Alice");
     await joinRoom(guest, "Bob", roomId);
-    await host.getByRole("button", { name: "Start" }).click();
-    await expect(host.getByRole("button", { name: /^Enter$/ })).toBeVisible();
+    await startGame(host, guest);
 
     // Guest closes their tab (simulates disconnect)
     await ctxB.close();
 
-    // Host should see the disconnected notice
-    await expect(host.getByText("Opponent disconnected.")).toBeVisible({ timeout: 8000 });
+    // Host should see the disconnected notice after the grace period (30s)
+    await expect(host.getByText("Opponent disconnected.")).toBeVisible({ timeout: 35000 });
     await expect(host.getByRole("button", { name: "Back to lobby" })).toBeVisible();
+
+    await ctxA.close();
   });
 });

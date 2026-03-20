@@ -24,6 +24,7 @@ export default function GamePage() {
   const [opponentLeft, setOpponentLeft] = useState(false);
   const [shake, setShake] = useState(false);
   const [tiebreakerBanner, setTiebreakerBanner] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
   const socketRef = useRef(getSocket());
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -65,7 +66,12 @@ export default function GamePage() {
 
     socket.on("room_update", (snapshot: RoomSnapshot) => setRoom(snapshot));
 
+    socket.on("countdown", ({ value }: { value: number }) => {
+      setCountdown(value);
+    });
+
     socket.on("match_started", () => {
+      setCountdown(null);
       setCurrentGuess("");
       setMessage("");
       setWordFlash(null);
@@ -80,6 +86,7 @@ export default function GamePage() {
       setMessage("");
       setTiebreakerBanner(false);
       setOpponentLeft(false);
+      setCountdown(null);
     });
 
     socket.on("tiebreaker_started", () => {
@@ -115,6 +122,7 @@ export default function GamePage() {
     return () => {
       socket.off("connect");
       socket.off("room_update");
+      socket.off("countdown");
       socket.off("match_started");
       socket.off("game_restarted");
       socket.off("tiebreaker_started");
@@ -153,7 +161,7 @@ export default function GamePage() {
 
   const setRounds = (n: number) => socketRef.current.emit("set_rounds", { totalRounds: n });
   const setScoringMode = (m: ScoringMode) => socketRef.current.emit("set_scoring_mode", { scoringMode: m });
-  const startGame = () => socketRef.current.emit("start_game");
+  const toggleReady = () => socketRef.current.emit("player_ready");
   const restartGame = () => socketRef.current.emit("restart_game");
   const leaveGame = () => router.push("/");
 
@@ -165,8 +173,9 @@ export default function GamePage() {
     );
   }
 
-  const canStart = room.players.length >= 2 && !room.started && isHost;
   const isPoints = room.scoringMode === "points";
+  const amReady = myPlayer?.ready ?? false;
+  const canReady = room.players.length >= 2 && !room.started && !room.counting;
 
   return (
     <main className="min-h-screen bg-zinc-950 text-white flex flex-col items-center gap-4 py-4 px-4">
@@ -242,8 +251,11 @@ export default function GamePage() {
           <div className="flex flex-col gap-2 w-full">
             {room.players.map((p) => (
               <div key={p.id} className="flex items-center gap-2 bg-zinc-800 rounded-lg px-4 py-2">
-                <span className="w-2 h-2 rounded-full bg-sky-400" />
+                <span className={`w-2 h-2 rounded-full ${p.ready ? "bg-green-400" : "bg-sky-400"}`} />
                 <span className="font-medium">{p.name}</span>
+                {p.ready && (
+                  <span className="text-xs text-green-400 font-semibold">READY</span>
+                )}
                 {p.id === myId && <span className="text-xs text-zinc-500 ml-auto">you</span>}
               </div>
             ))}
@@ -255,21 +267,16 @@ export default function GamePage() {
             )}
           </div>
 
-          {room.players.length < 2 && (
-            <p className="text-sm text-zinc-500">
-              Share code <span className="font-mono text-sky-400">{roomId}</span> with a friend
-            </p>
-          )}
-
-          {isHost ? (
+          {/* Host settings */}
+          {isHost && (
             <>
-              {/* Scoring mode selector */}
               <div className="w-full flex flex-col gap-2">
                 <p className="text-sm text-zinc-400 text-center">Scoring mode</p>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => setScoringMode("sprint")}
-                    className={`flex flex-col items-start gap-1 p-3 rounded-xl border-2 text-left transition-colors ${
+                    disabled={amReady}
+                    className={`flex flex-col items-start gap-1 p-3 rounded-xl border-2 text-left transition-colors disabled:opacity-50 ${
                       !isPoints
                         ? "border-sky-500 bg-sky-500/10"
                         : "border-zinc-700 bg-zinc-800 hover:border-zinc-600"
@@ -282,7 +289,8 @@ export default function GamePage() {
                   </button>
                   <button
                     onClick={() => setScoringMode("points")}
-                    className={`flex flex-col items-start gap-1 p-3 rounded-xl border-2 text-left transition-colors ${
+                    disabled={amReady}
+                    className={`flex flex-col items-start gap-1 p-3 rounded-xl border-2 text-left transition-colors disabled:opacity-50 ${
                       isPoints
                         ? "border-yellow-500 bg-yellow-500/10"
                         : "border-zinc-700 bg-zinc-800 hover:border-zinc-600"
@@ -301,7 +309,6 @@ export default function GamePage() {
                 )}
               </div>
 
-              {/* Round selector — sprint only */}
               {!isPoints && (
                 <div className="w-full flex flex-col gap-2">
                   <p className="text-sm text-zinc-400 text-center">Number of Rounds</p>
@@ -310,7 +317,8 @@ export default function GamePage() {
                       <button
                         key={n}
                         onClick={() => setRounds(n)}
-                        className={`w-10 h-10 rounded-lg font-bold text-sm transition-colors ${
+                        disabled={amReady}
+                        className={`w-10 h-10 rounded-lg font-bold text-sm transition-colors disabled:opacity-50 ${
                           room.totalRounds === n
                             ? "bg-sky-500 text-white"
                             : "bg-zinc-700 text-white hover:bg-zinc-600"
@@ -322,37 +330,48 @@ export default function GamePage() {
                   </div>
                 </div>
               )}
-
-              <button
-                disabled={!canStart}
-                onClick={startGame}
-                className="w-full bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-white font-bold py-3 rounded-lg transition-colors"
-              >
-                {canStart ? "Start" : "Waiting for opponent…"}
-              </button>
             </>
-          ) : (
-            room.players.length >= 2 && (
-              <div className="w-full bg-zinc-800 rounded-xl p-4 flex flex-col gap-2 text-sm text-zinc-300">
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Mode</span>
-                  <span className="font-semibold">{isPoints ? "Points" : "Sprint"}</span>
-                </div>
-                {!isPoints && (
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Words</span>
-                    <span className="font-semibold">{room.totalRounds}</span>
-                  </div>
-                )}
-                {isPoints && (
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Goal</span>
-                    <span className="font-semibold text-yellow-400">Race to 12 pts</span>
-                  </div>
-                )}
-                <p className="text-zinc-500 text-xs text-center pt-1">Waiting for host to start…</p>
+          )}
+
+          {/* Non-host settings summary */}
+          {!isHost && room.players.length >= 2 && (
+            <div className="w-full bg-zinc-800 rounded-xl p-4 flex flex-col gap-2 text-sm text-zinc-300">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Mode</span>
+                <span className="font-semibold">{isPoints ? "Points" : "Sprint"}</span>
               </div>
-            )
+              {!isPoints && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Words</span>
+                  <span className="font-semibold">{room.totalRounds}</span>
+                </div>
+              )}
+              {isPoints && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Goal</span>
+                  <span className="font-semibold text-yellow-400">Race to 12 pts</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Ready button — shown to both players once opponent has joined */}
+          {canReady && (
+            <button
+              onClick={toggleReady}
+              className={`w-full font-bold py-3 rounded-lg transition-colors ${
+                amReady
+                  ? "bg-green-600 hover:bg-green-500 text-white"
+                  : "bg-sky-500 hover:bg-sky-400 text-white"
+              }`}
+            >
+              {amReady ? "Ready! (click to cancel)" : "Ready"}
+            </button>
+          )}
+          {!canReady && room.players.length < 2 && (
+            <p className="text-sm text-zinc-500">
+              Share code <span className="font-mono text-sky-400">{roomId}</span> with a friend
+            </p>
           )}
         </div>
       )}
@@ -433,6 +452,18 @@ export default function GamePage() {
 
           {/* Right: spacer to keep board centered */}
           <div className="w-32 shrink-0" />
+        </div>
+      )}
+
+      {/* Countdown overlay */}
+      {countdown !== null && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+          <div className="text-center flex flex-col items-center gap-4">
+            <p className="text-zinc-400 text-lg font-semibold tracking-widest uppercase">Get ready!</p>
+            <span className="text-9xl font-extrabold text-sky-400 tabular-nums leading-none">
+              {countdown}
+            </span>
+          </div>
         </div>
       )}
 

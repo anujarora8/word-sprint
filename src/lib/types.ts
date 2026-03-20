@@ -21,12 +21,14 @@ export interface PlayerSnapshot {
   tiebreakerScore: number;
   tiebreakerDone: boolean;
   waitingForOpponent: boolean;
+  ready: boolean;
 }
 
 export interface RoomSnapshot {
   id: string;
   started: boolean;
   finished: boolean;
+  counting: boolean;
   totalRounds: number;
   scoringMode: ScoringMode;
   tiebreaker: boolean;

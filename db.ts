@@ -35,6 +35,7 @@ export function initSchema(): void {
       id           TEXT PRIMARY KEY,
       started      INTEGER NOT NULL DEFAULT 0,
       finished     INTEGER NOT NULL DEFAULT 0,
+      counting     INTEGER NOT NULL DEFAULT 0,
       created_at   INTEGER NOT NULL,
       total_rounds INTEGER NOT NULL DEFAULT 3,
       scoring_mode TEXT    NOT NULL DEFAULT 'sprint',
@@ -55,10 +56,19 @@ export function initSchema(): void {
       tiebreaker_score   INTEGER NOT NULL DEFAULT 0,
       tiebreaker_done    INTEGER NOT NULL DEFAULT 0,
       waiting_for_opponent INTEGER NOT NULL DEFAULT 0,
+      ready              INTEGER NOT NULL DEFAULT 0,
       join_order         INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (player_id, room_id)
     );
   `);
+
+  // Migrate existing tables (safe to run repeatedly — ALTER TABLE fails silently if column exists)
+  for (const sql of [
+    "ALTER TABLE rooms ADD COLUMN counting INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE room_players ADD COLUMN ready INTEGER NOT NULL DEFAULT 0",
+  ]) {
+    try { db().exec(sql); } catch { /* column already exists */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +88,7 @@ export interface StoredPlayer {
   tiebreakerScore: number;
   tiebreakerDone: boolean;
   waitingForOpponent: boolean;
+  ready: boolean;
   joinOrder: number;
 }
 
@@ -85,6 +96,7 @@ export interface StoredRoom {
   id: string;
   started: boolean;
   finished: boolean;
+  counting: boolean;
   createdAt: number;
   totalRounds: number;
   scoringMode: string;
@@ -98,12 +110,13 @@ export function saveRoom(room: StoredRoom): void {
   d.transaction(() => {
     d.prepare(`
       INSERT OR REPLACE INTO rooms
-        (id, started, finished, created_at, total_rounds, scoring_mode, tiebreaker, word_sequence)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, started, finished, counting, created_at, total_rounds, scoring_mode, tiebreaker, word_sequence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       room.id,
       room.started ? 1 : 0,
       room.finished ? 1 : 0,
+      room.counting ? 1 : 0,
       room.createdAt,
       room.totalRounds,
       room.scoringMode,
@@ -115,13 +128,13 @@ export function saveRoom(room: StoredRoom): void {
         INSERT OR REPLACE INTO room_players
           (player_id, room_id, name, current_word, guesses, words_completed,
            total_guesses, finished, words_failed, score,
-           tiebreaker_score, tiebreaker_done, waiting_for_opponent, join_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           tiebreaker_score, tiebreaker_done, waiting_for_opponent, ready, join_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         p.playerId, room.id, p.name, p.currentWord, p.guesses,
         p.wordsCompleted, p.totalGuesses, p.finished ? 1 : 0, p.wordsFailed,
         p.score, p.tiebreakerScore, p.tiebreakerDone ? 1 : 0,
-        p.waitingForOpponent ? 1 : 0, p.joinOrder,
+        p.waitingForOpponent ? 1 : 0, p.ready ? 1 : 0, p.joinOrder,
       );
     }
   })();
@@ -133,7 +146,7 @@ export function loadActiveRooms(): StoredRoom[] {
   const rows = d.prepare(
     "SELECT * FROM rooms WHERE finished = 0 AND created_at > ?"
   ).all(cutoff) as {
-    id: string; started: number; finished: number; created_at: number;
+    id: string; started: number; finished: number; counting: number; created_at: number;
     total_rounds: number; scoring_mode: string; tiebreaker: number; word_sequence: string;
   }[];
 
@@ -144,13 +157,14 @@ export function loadActiveRooms(): StoredRoom[] {
       player_id: string; name: string; current_word: string; guesses: string;
       words_completed: number; total_guesses: number; finished: number;
       words_failed: number; score: number; tiebreaker_score: number;
-      tiebreaker_done: number; waiting_for_opponent: number; join_order: number;
+      tiebreaker_done: number; waiting_for_opponent: number; ready: number; join_order: number;
     }[];
 
     return {
       id: r.id,
       started: r.started === 1,
       finished: r.finished === 1,
+      counting: r.counting === 1,
       createdAt: r.created_at,
       totalRounds: r.total_rounds,
       scoringMode: r.scoring_mode,
@@ -169,6 +183,7 @@ export function loadActiveRooms(): StoredRoom[] {
         tiebreakerScore: p.tiebreaker_score,
         tiebreakerDone: p.tiebreaker_done === 1,
         waitingForOpponent: p.waiting_for_opponent === 1,
+        ready: p.ready === 1,
         joinOrder: p.join_order,
       })),
     };
