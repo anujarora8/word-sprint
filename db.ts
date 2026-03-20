@@ -31,7 +31,156 @@ export function initSchema(): void {
       key  TEXT PRIMARY KEY,
       value TEXT
     );
+    CREATE TABLE IF NOT EXISTS rooms (
+      id           TEXT PRIMARY KEY,
+      started      INTEGER NOT NULL DEFAULT 0,
+      finished     INTEGER NOT NULL DEFAULT 0,
+      created_at   INTEGER NOT NULL,
+      total_rounds INTEGER NOT NULL DEFAULT 3,
+      scoring_mode TEXT    NOT NULL DEFAULT 'sprint',
+      tiebreaker   INTEGER NOT NULL DEFAULT 0,
+      word_sequence TEXT   NOT NULL DEFAULT '[]'
+    );
+    CREATE TABLE IF NOT EXISTS room_players (
+      player_id          TEXT    NOT NULL,
+      room_id            TEXT    NOT NULL,
+      name               TEXT    NOT NULL,
+      current_word       TEXT    NOT NULL DEFAULT '',
+      guesses            TEXT    NOT NULL DEFAULT '[]',
+      words_completed    INTEGER NOT NULL DEFAULT 0,
+      total_guesses      INTEGER NOT NULL DEFAULT 0,
+      finished           INTEGER NOT NULL DEFAULT 0,
+      words_failed       INTEGER NOT NULL DEFAULT 0,
+      score              INTEGER NOT NULL DEFAULT 0,
+      tiebreaker_score   INTEGER NOT NULL DEFAULT 0,
+      tiebreaker_done    INTEGER NOT NULL DEFAULT 0,
+      waiting_for_opponent INTEGER NOT NULL DEFAULT 0,
+      join_order         INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (player_id, room_id)
+    );
   `);
+}
+
+// ---------------------------------------------------------------------------
+// Room persistence
+// ---------------------------------------------------------------------------
+
+export interface StoredPlayer {
+  playerId: string;
+  name: string;
+  currentWord: string;
+  guesses: string; // JSON string of GuessResult[][]
+  wordsCompleted: number;
+  totalGuesses: number;
+  finished: boolean;
+  wordsFailed: number;
+  score: number;
+  tiebreakerScore: number;
+  tiebreakerDone: boolean;
+  waitingForOpponent: boolean;
+  joinOrder: number;
+}
+
+export interface StoredRoom {
+  id: string;
+  started: boolean;
+  finished: boolean;
+  createdAt: number;
+  totalRounds: number;
+  scoringMode: string;
+  tiebreaker: boolean;
+  wordSequence: string[];
+  players: StoredPlayer[];
+}
+
+export function saveRoom(room: StoredRoom): void {
+  const d = db();
+  d.transaction(() => {
+    d.prepare(`
+      INSERT OR REPLACE INTO rooms
+        (id, started, finished, created_at, total_rounds, scoring_mode, tiebreaker, word_sequence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      room.id,
+      room.started ? 1 : 0,
+      room.finished ? 1 : 0,
+      room.createdAt,
+      room.totalRounds,
+      room.scoringMode,
+      room.tiebreaker ? 1 : 0,
+      JSON.stringify(room.wordSequence),
+    );
+    for (const p of room.players) {
+      d.prepare(`
+        INSERT OR REPLACE INTO room_players
+          (player_id, room_id, name, current_word, guesses, words_completed,
+           total_guesses, finished, words_failed, score,
+           tiebreaker_score, tiebreaker_done, waiting_for_opponent, join_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        p.playerId, room.id, p.name, p.currentWord, p.guesses,
+        p.wordsCompleted, p.totalGuesses, p.finished ? 1 : 0, p.wordsFailed,
+        p.score, p.tiebreakerScore, p.tiebreakerDone ? 1 : 0,
+        p.waitingForOpponent ? 1 : 0, p.joinOrder,
+      );
+    }
+  })();
+}
+
+export function loadActiveRooms(): StoredRoom[] {
+  const d = db();
+  const cutoff = Date.now() - 3_600_000; // ignore rooms older than 1 hour
+  const rows = d.prepare(
+    "SELECT * FROM rooms WHERE finished = 0 AND created_at > ?"
+  ).all(cutoff) as {
+    id: string; started: number; finished: number; created_at: number;
+    total_rounds: number; scoring_mode: string; tiebreaker: number; word_sequence: string;
+  }[];
+
+  return rows.map((r) => {
+    const players = d.prepare(
+      "SELECT * FROM room_players WHERE room_id = ? ORDER BY join_order ASC"
+    ).all(r.id) as {
+      player_id: string; name: string; current_word: string; guesses: string;
+      words_completed: number; total_guesses: number; finished: number;
+      words_failed: number; score: number; tiebreaker_score: number;
+      tiebreaker_done: number; waiting_for_opponent: number; join_order: number;
+    }[];
+
+    return {
+      id: r.id,
+      started: r.started === 1,
+      finished: r.finished === 1,
+      createdAt: r.created_at,
+      totalRounds: r.total_rounds,
+      scoringMode: r.scoring_mode,
+      tiebreaker: r.tiebreaker === 1,
+      wordSequence: JSON.parse(r.word_sequence) as string[],
+      players: players.map((p) => ({
+        playerId: p.player_id,
+        name: p.name,
+        currentWord: p.current_word,
+        guesses: p.guesses,
+        wordsCompleted: p.words_completed,
+        totalGuesses: p.total_guesses,
+        finished: p.finished === 1,
+        wordsFailed: p.words_failed,
+        score: p.score,
+        tiebreakerScore: p.tiebreaker_score,
+        tiebreakerDone: p.tiebreaker_done === 1,
+        waitingForOpponent: p.waiting_for_opponent === 1,
+        joinOrder: p.join_order,
+      })),
+    };
+  });
+}
+
+export function deleteRoom(roomId: string): void {
+  const d = db();
+  d.transaction(() => {
+    d.prepare("DELETE FROM room_players WHERE room_id = ?").run(roomId);
+    d.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
+  })();
 }
 
 // ---------------------------------------------------------------------------

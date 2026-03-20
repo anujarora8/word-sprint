@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getSocket } from "@/lib/socket";
+import { getSocket, getPlayerId } from "@/lib/socket";
 
 type Step = "name" | "choice" | "join";
 
@@ -42,7 +42,7 @@ export default function Home() {
   const createRoom = () => {
     setError("");
     setLoading(true);
-    getSocket().emit("create_room", { playerName: name.trim() });
+    getSocket().emit("create_room", { playerName: name.trim(), playerId: getPlayerId() });
   };
 
   const goJoin = () => {
@@ -54,7 +54,7 @@ export default function Home() {
     if (!roomId.trim()) { setError("Enter the room code."); return; }
     setError("");
     setLoading(true);
-    getSocket().emit("join_room", { roomId: roomId.trim(), playerName: name.trim() });
+    getSocket().emit("join_room", { roomId: roomId.trim(), playerName: name.trim(), playerId: getPlayerId() });
   };
 
   return (

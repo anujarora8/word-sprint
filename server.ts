@@ -12,6 +12,9 @@ import {
   pickWord,
   answersCount,
   clearAnswersMeta,
+  saveRoom,
+  loadActiveRooms,
+  deleteRoom,
 } from "./db";
 
 const port = parseInt(process.env.PORT || "3000", 10);
@@ -31,6 +34,8 @@ const POINTS_TABLE: Record<number, number> = {
 };
 const MAX_NAME_LENGTH = 16;
 const GUESS_RATE_LIMIT_MS = 500;
+// Grace period before a disconnected player is removed (allows reconnect after server restart)
+const DISCONNECT_GRACE_MS = 30_000;
 
 function pointsForGuesses(guessCount: number, solved: boolean): number {
   return solved ? (POINTS_TABLE[guessCount] ?? 0) : 0;
@@ -39,33 +44,31 @@ function pointsForGuesses(guessCount: number, solved: boolean): number {
 // --- Game state types ---
 
 interface PlayerState {
-  id: string;
+  id: string;       // persistent client-generated UUID
   name: string;
   currentWord: string;
   guesses: GuessResult[][];
   wordsCompleted: number;
   totalGuesses: number;
-  finished: boolean;      // reached target (sprint: all rounds done, points: hit 12)
+  finished: boolean;
   wordsFailed: number;
   score: number;
-  // Tiebreaker
   tiebreakerScore: number;
   tiebreakerDone: boolean;
-  // Points mode: waiting for opponent to finish their current word before game ends
   waitingForOpponent: boolean;
 }
 
 interface Room {
   id: string;
-  players: Map<string, PlayerState>;
+  players: Map<string, PlayerState>; // keyed by persistent playerId
   started: boolean;
   finished: boolean;
   createdAt: number;
-  totalRounds: number;   // sprint only
+  totalRounds: number;
   scoringMode: ScoringMode;
   tiebreaker: boolean;
-  wordSequence: string[]; // shared across both players
-  wordSet: Set<string>;   // kept in sync with wordSequence for O(1) duplicate checks
+  wordSequence: string[];
+  wordSet: Set<string>;
 }
 
 function evaluateGuess(guess: string, target: string): GuessResult[] {
@@ -89,7 +92,6 @@ function evaluateGuess(guess: string, target: string): GuessResult[] {
   return result;
 }
 
-// Generate n distinct words for the shared room sequence
 function generateWordSequence(n: number): { words: string[]; wordSet: Set<string> } {
   const wordSet = new Set<string>();
   const words: string[] = [];
@@ -101,23 +103,98 @@ function generateWordSequence(n: number): { words: string[]; wordSet: Set<string
   return { words, wordSet };
 }
 
-// --- Server ---
+// --- In-memory rooms (backed by SQLite) ---
 const rooms = new Map<string, Room>();
 
+// Pending disconnect timers: "roomId:playerId" → timer
+const disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Serialise room → SQLite
+function persistRoom(room: Room): void {
+  const players = [...room.players.values()];
+  saveRoom({
+    id: room.id,
+    started: room.started,
+    finished: room.finished,
+    createdAt: room.createdAt,
+    totalRounds: room.totalRounds,
+    scoringMode: room.scoringMode,
+    tiebreaker: room.tiebreaker,
+    wordSequence: room.wordSequence,
+    players: players.map((p, i) => ({
+      playerId: p.id,
+      name: p.name,
+      currentWord: p.currentWord,
+      guesses: JSON.stringify(p.guesses),
+      wordsCompleted: p.wordsCompleted,
+      totalGuesses: p.totalGuesses,
+      finished: p.finished,
+      wordsFailed: p.wordsFailed,
+      score: p.score,
+      tiebreakerScore: p.tiebreakerScore,
+      tiebreakerDone: p.tiebreakerDone,
+      waitingForOpponent: p.waitingForOpponent,
+      joinOrder: i,
+    })),
+  });
+}
+
+// Restore rooms from SQLite into the in-memory map on startup
+function restoreRooms(): void {
+  const stored = loadActiveRooms();
+  for (const r of stored) {
+    const wordSet = new Set(r.wordSequence);
+    const players = new Map<string, PlayerState>();
+    for (const p of r.players) {
+      players.set(p.playerId, {
+        id: p.playerId,
+        name: p.name,
+        currentWord: p.currentWord,
+        guesses: JSON.parse(p.guesses) as GuessResult[][],
+        wordsCompleted: p.wordsCompleted,
+        totalGuesses: p.totalGuesses,
+        finished: p.finished,
+        wordsFailed: p.wordsFailed,
+        score: p.score,
+        tiebreakerScore: p.tiebreakerScore,
+        tiebreakerDone: p.tiebreakerDone,
+        waitingForOpponent: p.waitingForOpponent,
+      });
+    }
+    rooms.set(r.id, {
+      id: r.id,
+      players,
+      started: r.started,
+      finished: r.finished,
+      createdAt: r.createdAt,
+      totalRounds: r.totalRounds,
+      scoringMode: r.scoringMode as ScoringMode,
+      tiebreaker: r.tiebreaker,
+      wordSequence: r.wordSequence,
+      wordSet,
+    });
+  }
+  if (stored.length > 0) console.log(`> Restored ${stored.length} active room(s) from DB`);
+}
+
+// Expire rooms older than 1 hour
 setInterval(() => {
   const now = Date.now();
   for (const [id, room] of rooms) {
-    if (now - room.createdAt > 3_600_000) rooms.delete(id);
+    if (now - room.createdAt > 3_600_000) {
+      rooms.delete(id);
+      deleteRoom(id);
+    }
   }
 }, 300_000);
 
 app.prepare().then(async () => {
   initSchema();
+  restoreRooms();
 
   const forceReset = process.env.RESET_WORDS === "true";
   if (forceReset) clearAnswersMeta();
 
-  // Use allSettled so a transient network failure doesn't crash a warm server
   const [answersResult, wordsResult] = await Promise.allSettled([
     syncAnswers(forceReset),
     syncValidWords(),
@@ -135,14 +212,10 @@ app.prepare().then(async () => {
   }
 
   scheduleDailySync();
-
-  const count = answersCount();
-  console.log(`> answers table: ${count} rows`);
+  console.log(`> answers table: ${answersCount()} rows`);
 
   const corsOrigin = process.env.CORS_ORIGIN;
-  if (!corsOrigin && !dev) {
-    throw new Error("CORS_ORIGIN must be set in production");
-  }
+  if (!corsOrigin && !dev) throw new Error("CORS_ORIGIN must be set in production");
 
   const httpServer = createServer((req, res) => handle(req, res));
   const io = new Server(httpServer, {
@@ -151,6 +224,7 @@ app.prepare().then(async () => {
 
   io.on("connection", (socket) => {
     let currentRoomId: string | null = null;
+    let currentPlayerId: string | null = null;
     let lastGuessTime = 0;
 
     function validateName(raw: unknown): string | null {
@@ -159,7 +233,11 @@ app.prepare().then(async () => {
       return trimmed;
     }
 
-    socket.on("create_room", ({ playerName }: { playerName: string }) => {
+    function isHost(room: Room): boolean {
+      return [...room.players.keys()][0] === currentPlayerId;
+    }
+
+    socket.on("create_room", ({ playerName, playerId }: { playerName: string; playerId: string }) => {
       const name = validateName(playerName);
       if (!name) { socket.emit("app_error", { message: "Name must be 1–16 characters." }); return; }
 
@@ -176,60 +254,85 @@ app.prepare().then(async () => {
         wordSequence: [],
         wordSet: new Set(),
       };
-      room.players.set(socket.id, makePlayer(socket.id, name));
+      room.players.set(playerId, makePlayer(playerId, name));
       rooms.set(roomId, room);
       currentRoomId = roomId;
+      currentPlayerId = playerId;
       socket.join(roomId);
       socket.emit("room_created", { roomId });
+      persistRoom(room);
       io.to(roomId).emit("room_update", roomSnapshot(room));
     });
 
-    socket.on("join_room", ({ roomId, playerName }: { roomId: string; playerName: string }) => {
+    socket.on("join_room", ({ roomId, playerName, playerId }: { roomId: string; playerName: string; playerId: string }) => {
       const name = validateName(playerName);
       if (!name) { socket.emit("app_error", { message: "Name must be 1–16 characters." }); return; }
 
       const room = rooms.get(roomId.toUpperCase());
       if (!room) { socket.emit("app_error", { message: "Room not found." }); return; }
       if (room.started) { socket.emit("app_error", { message: "Game already started." }); return; }
-      if (room.players.size >= 2) { socket.emit("app_error", { message: "Room is full." }); return; }
-      room.players.set(socket.id, makePlayer(socket.id, name));
+      if (room.players.size >= 2 && !room.players.has(playerId)) {
+        socket.emit("app_error", { message: "Room is full." }); return;
+      }
+
+      // Cancel any pending disconnect timer if the player is rejoining
+      const timerKey = `${roomId.toUpperCase()}:${playerId}`;
+      const pending = disconnectTimers.get(timerKey);
+      if (pending) { clearTimeout(pending); disconnectTimers.delete(timerKey); }
+
+      room.players.set(playerId, makePlayer(playerId, name));
       currentRoomId = roomId.toUpperCase();
+      currentPlayerId = playerId;
       socket.join(currentRoomId);
       socket.emit("room_joined", { roomId: currentRoomId });
+      persistRoom(room);
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
+    });
+
+    socket.on("request_room_state", ({ roomId, playerId }: { roomId: string; playerId?: string }) => {
+      const upperRoomId = roomId.toUpperCase();
+      const room = rooms.get(upperRoomId);
+      if (!room) return;
+
+      // Reconnect: cancel pending disconnect timer and re-associate this socket
+      if (playerId && room.players.has(playerId)) {
+        const timerKey = `${upperRoomId}:${playerId}`;
+        const pending = disconnectTimers.get(timerKey);
+        if (pending) { clearTimeout(pending); disconnectTimers.delete(timerKey); }
+
+        currentRoomId = upperRoomId;
+        currentPlayerId = playerId;
+        socket.join(upperRoomId);
+      }
+
+      socket.emit("room_update", roomSnapshot(room));
     });
 
     socket.on("set_rounds", ({ totalRounds }: { totalRounds: number }) => {
       if (!currentRoomId) return;
       const room = rooms.get(currentRoomId);
-      if (!room || room.started) return;
-      if ([...room.players.keys()][0] !== socket.id) return;
+      if (!room || room.started || !isHost(room)) return;
       room.totalRounds = Math.min(Math.max(1, totalRounds), 5);
+      persistRoom(room);
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
     });
 
     socket.on("set_scoring_mode", ({ scoringMode }: { scoringMode: ScoringMode }) => {
       if (!currentRoomId) return;
       const room = rooms.get(currentRoomId);
-      if (!room || room.started) return;
-      if ([...room.players.keys()][0] !== socket.id) return;
+      if (!room || room.started || !isHost(room)) return;
       if (scoringMode !== "sprint" && scoringMode !== "points") return;
       room.scoringMode = scoringMode;
+      persistRoom(room);
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
-    });
-
-    socket.on("request_room_state", ({ roomId }: { roomId: string }) => {
-      const room = rooms.get(roomId.toUpperCase());
-      if (room) socket.emit("room_update", roomSnapshot(room));
     });
 
     socket.on("start_game", () => {
       if (!currentRoomId) return;
       const room = rooms.get(currentRoomId);
-      if (!room || room.started || room.players.size < 2) return;
+      if (!room || room.started || room.players.size < 2 || !isHost(room)) return;
       room.started = true;
       room.tiebreaker = false;
-      // Points mode: pre-generate a large pool (players may need many words racing to 12)
       const sequenceLen = room.scoringMode === "points" ? 20 : room.totalRounds;
       const { words, wordSet } = generateWordSequence(sequenceLen);
       room.wordSequence = words;
@@ -238,20 +341,20 @@ app.prepare().then(async () => {
       for (const player of room.players.values()) {
         resetPlayer(player, room.wordSequence[0]);
       }
+      persistRoom(room);
       io.to(currentRoomId).emit("match_started");
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
     });
 
     socket.on("submit_guess", ({ guess }: { guess: string }) => {
-      // Rate limit: ignore bursts faster than GUESS_RATE_LIMIT_MS (imperceptible to humans)
       const now = Date.now();
       if (now - lastGuessTime < GUESS_RATE_LIMIT_MS) return;
       lastGuessTime = now;
 
-      if (!currentRoomId) return;
+      if (!currentRoomId || !currentPlayerId) return;
       const room = rooms.get(currentRoomId);
       if (!room || !room.started || room.finished) return;
-      const player = room.players.get(socket.id);
+      const player = room.players.get(currentPlayerId);
       if (!player || player.finished) return;
       if (player.guesses.length >= 6) return;
       if (guess.length !== 5) { socket.emit("app_error", { message: "Guess must be 5 letters." }); return; }
@@ -291,13 +394,10 @@ app.prepare().then(async () => {
           if (a && b) {
             if (a.tiebreakerScore > b.tiebreakerScore) winnerId = a.id;
             else if (b.tiebreakerScore > a.tiebreakerScore) winnerId = b.id;
-          } else if (a) {
-            winnerId = a.id;
-          }
+          } else if (a) { winnerId = a.id; }
+          persistRoom(room);
           io.to(currentRoomId).emit("match_over", {
-            scoringMode: "points",
-            tiebreaker: true,
-            winnerId,
+            scoringMode: "points", tiebreaker: true, winnerId,
             results: allPlayers.map((p) => ({
               id: p.id, name: p.name,
               wordsCompleted: p.wordsCompleted, wordsFailed: p.wordsFailed,
@@ -322,16 +422,14 @@ app.prepare().then(async () => {
           console.log(`> [${player.name}] next word (sprint #${player.wordsCompleted}): ${player.currentWord}`);
         }
 
-        io.to(currentRoomId).emit("room_update", roomSnapshot(room));
-
         if (isLastWord) {
           room.finished = true;
           const allPlayers = [...room.players.values()];
           const winner = allPlayers.find((p) => p.finished);
+          persistRoom(room);
+          io.to(currentRoomId).emit("room_update", roomSnapshot(room));
           io.to(currentRoomId).emit("match_over", {
-            scoringMode: "sprint",
-            tiebreaker: false,
-            winnerId: winner?.id ?? null,
+            scoringMode: "sprint", tiebreaker: false, winnerId: winner?.id ?? null,
             results: allPlayers.map((p) => ({
               id: p.id, name: p.name,
               wordsCompleted: p.wordsCompleted, wordsFailed: p.wordsFailed,
@@ -339,6 +437,9 @@ app.prepare().then(async () => {
               score: 0, tiebreakerScore: 0,
             })) satisfies MatchOverResult[],
           });
+        } else {
+          persistRoom(room);
+          io.to(currentRoomId).emit("room_update", roomSnapshot(room));
         }
         return;
       }
@@ -359,30 +460,21 @@ app.prepare().then(async () => {
       });
 
       if (hitTarget) {
-        // Mark this player done. Don't end the game yet — give the opponent a
-        // chance to finish their current word so neither player is cut off mid-guess.
         player.finished = true;
         player.waitingForOpponent = false;
-
         if (other && !other.finished) {
-          // Opponent is still playing — let them complete their current word.
-          // Signal them so the UI can show "opponent reached 12!" if desired.
           other.waitingForOpponent = true;
+          persistRoom(room);
           io.to(currentRoomId).emit("room_update", roomSnapshot(room));
-          // Game will resolve when the opponent finishes their current word (below).
         } else {
-          // Opponent already finished (or doesn't exist) — resolve now.
           resolvePointsGame(room, allPlayers, currentRoomId, io);
         }
       } else if (other?.waitingForOpponent) {
-        // This player just finished their word and the opponent was waiting.
-        // Now both have completed their current word — resolve.
         other.waitingForOpponent = false;
+        persistRoom(room);
         io.to(currentRoomId).emit("room_update", roomSnapshot(room));
         resolvePointsGame(room, allPlayers, currentRoomId, io);
       } else {
-        // Haven't hit 12 yet — next word.
-        // Extend sequence if somehow exhausted (safety net).
         while (room.wordSequence.length <= player.wordsCompleted) {
           const extra = pickWord(room.wordSet);
           room.wordSequence.push(extra);
@@ -392,6 +484,7 @@ app.prepare().then(async () => {
         player.currentWord = room.wordSequence[player.wordsCompleted];
         player.guesses = [];
         console.log(`> [${player.name}] next word (points #${player.wordsCompleted}): ${player.currentWord}`);
+        persistRoom(room);
         io.to(currentRoomId).emit("room_update", roomSnapshot(room));
       }
     });
@@ -399,9 +492,7 @@ app.prepare().then(async () => {
     socket.on("restart_game", () => {
       if (!currentRoomId) return;
       const room = rooms.get(currentRoomId);
-      if (!room) return;
-      // Only host can restart
-      if ([...room.players.keys()][0] !== socket.id) return;
+      if (!room || !isHost(room)) return;
       room.started = false;
       room.finished = false;
       room.tiebreaker = false;
@@ -410,40 +501,50 @@ app.prepare().then(async () => {
       for (const player of room.players.values()) {
         resetPlayerToLobby(player);
       }
+      persistRoom(room);
       io.to(currentRoomId).emit("game_restarted");
       io.to(currentRoomId).emit("room_update", roomSnapshot(room));
     });
 
     socket.on("disconnect", () => {
-      if (!currentRoomId) return;
+      if (!currentRoomId || !currentPlayerId) return;
       const room = rooms.get(currentRoomId);
       if (!room) return;
-      room.players.delete(socket.id);
-      if (room.players.size === 0) {
-        rooms.delete(currentRoomId);
-      } else {
-        if (room.started && !room.finished) {
-          // Mark game over so the remaining player can't keep playing solo.
-          room.finished = true;
-          io.to(currentRoomId).emit("opponent_disconnected");
+
+      const roomId = currentRoomId;
+      const playerId = currentPlayerId;
+      const timerKey = `${roomId}:${playerId}`;
+
+      // Grace period: give the player DISCONNECT_GRACE_MS to reconnect
+      // before actually removing them (handles server restarts cleanly)
+      const timer = setTimeout(() => {
+        disconnectTimers.delete(timerKey);
+        const r = rooms.get(roomId);
+        if (!r) return;
+        r.players.delete(playerId);
+        if (r.players.size === 0) {
+          rooms.delete(roomId);
+          deleteRoom(roomId);
+        } else {
+          if (r.started && !r.finished) {
+            r.finished = true;
+            io.to(roomId).emit("opponent_disconnected");
+          }
+          persistRoom(r);
+          io.to(roomId).emit("room_update", roomSnapshot(r));
         }
-        io.to(currentRoomId).emit("room_update", roomSnapshot(room));
-      }
+      }, DISCONNECT_GRACE_MS);
+
+      disconnectTimers.set(timerKey, timer);
     });
   });
 
   httpServer.listen(port, () => console.log(`> Ready on http://localhost:${port}`));
 });
 
-function resolvePointsGame(
-  room: Room,
-  allPlayers: PlayerState[],
-  roomId: string,
-  io: Server
-) {
+function resolvePointsGame(room: Room, allPlayers: PlayerState[], roomId: string, io: Server) {
   const [a, b] = allPlayers;
 
-  // Both hit 12 with equal scores → tiebreaker
   if (a && b && a.finished && b.finished && a.score === b.score) {
     room.tiebreaker = true;
     const tbWord = pickWord(room.wordSet);
@@ -457,24 +558,22 @@ function resolvePointsGame(
       p.currentWord = tbWord;
       p.guesses = [];
     }
+    persistRoom(room);
     io.to(roomId).emit("tiebreaker_started");
     io.to(roomId).emit("room_update", roomSnapshot(room));
     return;
   }
 
-  // Otherwise: highest score wins (one or both may have hit 12)
   room.finished = true;
   let winnerId: string | null = null;
   if (a && b) {
     if (a.score > b.score) winnerId = a.id;
     else if (b.score > a.score) winnerId = b.id;
-  } else if (a) {
-    winnerId = a.id;
-  }
+  } else if (a) { winnerId = a.id; }
+
+  persistRoom(room);
   io.to(roomId).emit("match_over", {
-    scoringMode: "points",
-    tiebreaker: false,
-    winnerId,
+    scoringMode: "points", tiebreaker: false, winnerId,
     results: allPlayers.map((p) => ({
       id: p.id, name: p.name,
       wordsCompleted: p.wordsCompleted, wordsFailed: p.wordsFailed,
@@ -494,7 +593,6 @@ function makePlayer(id: string, name: string): PlayerState {
   };
 }
 
-// Resets all player fields to lobby state (no word assigned yet).
 function resetPlayerToLobby(player: PlayerState): void {
   player.currentWord = "";
   player.guesses = [];
@@ -508,7 +606,6 @@ function resetPlayerToLobby(player: PlayerState): void {
   player.waitingForOpponent = false;
 }
 
-// Resets player and assigns their first word (called when a game starts).
 function resetPlayer(player: PlayerState, firstWord: string) {
   resetPlayerToLobby(player);
   player.currentWord = firstWord;

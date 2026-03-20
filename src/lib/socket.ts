@@ -17,3 +17,15 @@ export function disconnectSocket() {
     socket = null;
   }
 }
+
+/** Returns a stable UUID for this browser, persisted in localStorage. */
+export function getPlayerId(): string {
+  if (typeof window === "undefined") return "";
+  const key = "word_sprint_player_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}

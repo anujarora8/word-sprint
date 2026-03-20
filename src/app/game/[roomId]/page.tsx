@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getSocket } from "@/lib/socket";
+import { getSocket, getPlayerId } from "@/lib/socket";
 import GameBoard from "@/components/GameBoard";
 import Keyboard from "@/components/Keyboard";
 import OpponentBoard from "@/components/OpponentBoard";
@@ -14,7 +14,8 @@ export default function GamePage() {
   const { roomId } = useParams<{ roomId: string }>();
   const router = useRouter();
 
-  const [myId, setMyId] = useState<string | null>(null);
+  // Stable identity — persisted in localStorage, survives reconnects
+  const [myId] = useState<string>(() => getPlayerId());
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [currentGuess, setCurrentGuess] = useState("");
   const [message, setMessage] = useState("");
@@ -49,17 +50,17 @@ export default function GamePage() {
   useEffect(() => {
     const socket = socketRef.current;
 
+    const playerId = getPlayerId();
+
     const init = () => {
-      setMyId(socket.id ?? null);
-      socket.emit("request_room_state", { roomId });
+      socket.emit("request_room_state", { roomId, playerId });
     };
 
     if (socket.connected) init();
     else socket.once("connect", init);
 
     socket.on("connect", () => {
-      setMyId(socket.id ?? null);
-      socket.emit("request_room_state", { roomId });
+      socket.emit("request_room_state", { roomId, playerId });
     });
 
     socket.on("room_update", (snapshot: RoomSnapshot) => setRoom(snapshot));
