@@ -1,6 +1,6 @@
 # Word Sprint
 
-Real-time 1v1 Wordle races. Two players share a room, guess the same words, and race to win — either by finishing all rounds first (Sprint) or accumulating the most points (Points).
+Real-time 1v1 word races. Two players share a room, guess the same words, and race to win — either by finishing all rounds first (Sprint) or accumulating the most points (Points).
 
 ---
 
