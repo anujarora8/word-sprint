@@ -262,7 +262,7 @@ export function pickWord(exclude: Set<string> = new Set()): string {
 }
 
 // ---------------------------------------------------------------------------
-// Populate answers (wordlehints.co.uk) — refreshed daily
+// Populate daily answers from external API
 // ---------------------------------------------------------------------------
 
 export async function syncAnswers(force = false): Promise<void> {
@@ -272,7 +272,7 @@ export async function syncAnswers(force = false): Promise<void> {
     return;
   }
 
-  console.log(`> Fetching answers from wordlehints.co.uk… (force=${force})`);
+  console.log(`> Fetching daily answers… (force=${force})`);
   const words: { word: string; date: string; game: number }[] = [];
   let page = 1;
   let hasMore = true;

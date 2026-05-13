@@ -62,7 +62,7 @@ export default function Home() {
       {/* Logo */}
       <div className="text-center mb-10">
         <h1 className="text-5xl font-extrabold tracking-tight text-sky-400">Word Sprint</h1>
-        <p className="text-zinc-500 mt-2">Real-time 1v1 Wordle races</p>
+        <p className="text-zinc-500 mt-2">Real-time 1v1 word races</p>
       </div>
 
       <div className="w-full max-w-xs flex flex-col gap-6">
